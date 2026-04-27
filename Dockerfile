@@ -17,8 +17,7 @@ COPY --from=xray-fetch /tmp/xray/geoip.dat /usr/local/share/xray/geoip.dat
 COPY --from=xray-fetch /tmp/xray/geosite.dat /usr/local/share/xray/geosite.dat
 
 COPY xray-config.json /etc/xray/config.json
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 ENV PORT=8080
 ENV VLESS_UUID=10974d1a-cbd6-4b6f-db1d-38d78b3fb109
