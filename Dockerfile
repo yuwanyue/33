@@ -13,9 +13,12 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 FROM traffmonetizer/cli_v2
 
 LABEL org.opencontainers.image.source="https://github.com/yuwanyue/33"
-LABEL org.opencontainers.image.description="HTTP正常"
+LABEL org.opencontainers.image.description="Traffmonetizer monitor with HTTP health endpoints"
 
 COPY --from=builder /out/tm-monitor /tm-monitor
+
+ENV PORT=8080
+ENV TM_ARGS="start accept"
 
 EXPOSE 8080
 
