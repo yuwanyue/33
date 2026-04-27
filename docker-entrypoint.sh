@@ -2,13 +2,14 @@
 set -eu
 
 PORT="${PORT:-8080}"
+XRAY_PORT="${XRAY_PORT:-10000}"
 UUID="${VLESS_UUID:-10974d1a-cbd6-4b6f-db1d-38d78b3fb109}"
 WS_PATH="${VLESS_WS_PATH:-/ws}"
 
 mkdir -p /run/xray
 ESC_WS_PATH=$(printf '%s' "$WS_PATH" | sed 's/[\/&]/\\&/g')
 sed \
-  -e "s/__PORT__/${PORT}/g" \
+  -e "s/__PORT__/${XRAY_PORT}/g" \
   -e "s/__UUID__/${UUID}/g" \
   -e "s/__WS_PATH__/${ESC_WS_PATH}/g" \
   /etc/xray/config.json > /run/xray/config.json
@@ -57,5 +58,8 @@ start_traffmonetizer() {
 
 start_traffmonetizer
 
-echo "[entrypoint] starting Xray VLESS+WS on :$PORT path=$WS_PATH"
-exec /usr/local/bin/xray run -config /run/xray/config.json
+echo "[entrypoint] starting Xray VLESS+WS on :$XRAY_PORT path=$WS_PATH"
+/usr/local/bin/xray run -config /run/xray/config.json &
+
+echo "[entrypoint] starting edge HTTP on :$PORT (healthz + ws proxy)"
+exec /usr/local/bin/edge-proxy
