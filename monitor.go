@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"os/signal"
 	"strings"
 	"sync"
@@ -21,7 +20,7 @@ type RuntimeStatus struct {
 	Running     bool      `json:"running"`
 	PID         int       `json:"pid,omitempty"`
 	Restarts    int       `json:"restarts"`
-	CLIPath     string    `json:"cli_path,omitempty"`
+	Command     string    `json:"command,omitempty"`
 	LastExit    string    `json:"last_exit,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
 	StartedAt   time.Time `json:"started_at,omitempty"`
@@ -30,116 +29,86 @@ type RuntimeStatus struct {
 }
 
 var (
-	mu     sync.RWMutex
-	status = RuntimeStatus{
-		Running:     false,
+	statusMu sync.RWMutex
+	status   = RuntimeStatus{
 		UpdatedAt:   time.Now(),
 		ServiceName: "traffmonetizer",
 	}
 )
 
-func setStatus(fn func(*RuntimeStatus)) {
-	mu.Lock()
-	defer mu.Unlock()
-	fn(&status)
+func setStatus(update func(*RuntimeStatus)) {
+	statusMu.Lock()
+	defer statusMu.Unlock()
+	update(&status)
 	status.UpdatedAt = time.Now()
 }
 
 func getStatus() RuntimeStatus {
-	mu.RLock()
-	defer mu.RUnlock()
+	statusMu.RLock()
+	defer statusMu.RUnlock()
 	return status
 }
 
-func pathExists(path string) bool {
-	st, err := os.Stat(path)
-	return err == nil && !st.IsDir()
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
-func findFirstExisting(paths []string) (string, bool) {
-	for _, p := range paths {
-		if pathExists(p) {
-			return p, true
+func findShell() (string, error) {
+	for _, candidate := range []string{"/bin/sh", "/bin/bash"} {
+		if fileExists(candidate) {
+			return candidate, nil
 		}
 	}
-	return "", false
+	return "", errors.New("no shell found")
 }
 
 func findCLI() (string, error) {
-	if p := os.Getenv("TM_CLI"); p != "" {
-		if pathExists(p) {
-			return p, nil
+	if explicit := strings.TrimSpace(os.Getenv("TM_CLI")); explicit != "" {
+		if fileExists(explicit) {
+			return explicit, nil
 		}
-		return "", fmt.Errorf("TM_CLI is set but not found: %s", p)
+		return "", fmt.Errorf("TM_CLI is set but not found: %s", explicit)
 	}
 
 	candidates := []string{
-		"./cli",
-		"./Cli",
-		"/cli",
 		"/Cli",
-		"/traffmonetizer",
+		"/cli",
 		"/tm",
+		"/traffmonetizer",
 		"/app/Cli",
 		"/app/cli",
+		"/usr/local/bin/Cli",
 		"/usr/local/bin/cli",
 		"/usr/local/bin/traffmonetizer",
-		"/usr/local/bin/Cli",
+		"/usr/bin/Cli",
 		"/usr/bin/cli",
 		"/usr/bin/traffmonetizer",
-		"/usr/bin/Cli",
-		"/entrypoint.sh",
-		"/docker-entrypoint.sh",
 	}
 
-	if p, ok := findFirstExisting(candidates); ok {
-		return p, nil
-	}
-
-	for _, name := range []string{"Cli", "cli", "traffmonetizer"} {
-		if p, err := exec.LookPath(name); err == nil {
-			return p, nil
+	for _, candidate := range candidates {
+		if fileExists(candidate) {
+			return candidate, nil
 		}
 	}
 
-	// Some upstream images keep the executable in a non-standard location.
-	for _, root := range []string{"/", "/app", "/usr/local/bin", "/usr/bin"} {
-		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-			if err != nil || info == nil || info.IsDir() {
-				return nil
-			}
-
-			name := strings.ToLower(info.Name())
-			switch name {
-			case "cli", "traffmonetizer", "entrypoint.sh", "docker-entrypoint.sh":
-				candidates = append(candidates, path)
-			}
-			return nil
-		})
-	}
-
-	if p, ok := findFirstExisting(candidates); ok {
-		return p, nil
+	for _, candidate := range []string{"Cli", "cli", "traffmonetizer"} {
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path, nil
+		}
 	}
 
 	return "", errors.New("Traffmonetizer CLI binary not found")
 }
 
-func shellPath() (string, error) {
-	if p, ok := findFirstExisting([]string{"/bin/sh", "/bin/bash"}); ok {
-		return p, nil
-	}
-	return "", errors.New("no shell found for TM_COMMAND")
-}
-
 func buildCommand(ctx context.Context, token string) (*exec.Cmd, string, error) {
-	if commandText := strings.TrimSpace(os.Getenv("TM_COMMAND")); commandText != "" {
-		sh, err := shellPath()
+	if raw := strings.TrimSpace(os.Getenv("TM_COMMAND")); raw != "" {
+		shellPath, err := findShell()
 		if err != nil {
 			return nil, "", err
 		}
-		masked := strings.ReplaceAll(commandText, token, "****")
-		return exec.CommandContext(ctx, sh, "-lc", commandText), masked, nil
+		masked := strings.ReplaceAll(raw, token, "****")
+		return exec.CommandContext(ctx, shellPath, "-lc", raw), masked, nil
 	}
 
 	cliPath, err := findCLI()
@@ -153,24 +122,11 @@ func buildCommand(ctx context.Context, token string) (*exec.Cmd, string, error) 
 	}
 
 	args := append(strings.Fields(argsText), "--token", token)
-	return exec.CommandContext(ctx, cliPath, args...), cliPath + " " + argsText + " --token ****", nil
+	masked := cliPath + " " + argsText + " --token ****"
+	return exec.CommandContext(ctx, cliPath, args...), masked, nil
 }
 
 func supervise(ctx context.Context, token string) {
-	_, maskedCommand, err := buildCommand(ctx, token)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		setStatus(func(s *RuntimeStatus) {
-			s.Running = false
-			s.LastError = err.Error()
-		})
-		return
-	}
-
-	setStatus(func(s *RuntimeStatus) {
-		s.CLIPath = maskedCommand
-	})
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -178,12 +134,13 @@ func supervise(ctx context.Context, token string) {
 		default:
 		}
 
-		cmd, maskedCommand, err := buildCommand(ctx, token)
+		cmd, masked, err := buildCommand(ctx, token)
 		if err != nil {
-			log.Printf("failed to build Traffmonetizer command: %v", err)
+			log.Printf("failed to build command: %v", err)
 			setStatus(func(s *RuntimeStatus) {
 				s.Running = false
 				s.PID = 0
+				s.Command = ""
 				s.LastError = err.Error()
 				s.Restarts++
 			})
@@ -194,13 +151,14 @@ func supervise(ctx context.Context, token string) {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
-		log.Printf("starting Traffmonetizer: %s", maskedCommand)
+		log.Printf("starting Traffmonetizer: %s", masked)
 
 		if err := cmd.Start(); err != nil {
 			log.Printf("failed to start Traffmonetizer: %v", err)
 			setStatus(func(s *RuntimeStatus) {
 				s.Running = false
 				s.PID = 0
+				s.Command = masked
 				s.LastError = err.Error()
 				s.Restarts++
 			})
@@ -211,28 +169,28 @@ func supervise(ctx context.Context, token string) {
 		setStatus(func(s *RuntimeStatus) {
 			s.Running = true
 			s.PID = cmd.Process.Pid
+			s.Command = masked
 			s.StartedAt = time.Now()
 			s.LastError = ""
 			s.LastExit = ""
 		})
 
-		err := cmd.Wait()
-
+		waitErr := cmd.Wait()
 		if ctx.Err() != nil {
 			return
 		}
 
-		exitMsg := "exited"
-		if err != nil {
-			exitMsg = err.Error()
+		exitMessage := "exited"
+		if waitErr != nil {
+			exitMessage = waitErr.Error()
 		}
 
-		log.Printf("Traffmonetizer exited: %s", exitMsg)
+		log.Printf("Traffmonetizer exited: %s", exitMessage)
 
 		setStatus(func(s *RuntimeStatus) {
 			s.Running = false
 			s.PID = 0
-			s.LastExit = exitMsg
+			s.LastExit = exitMessage
 			s.Restarts++
 		})
 
@@ -247,44 +205,36 @@ func writeJSON(w http.ResponseWriter, code int, payload any) {
 }
 
 func main() {
-	port := os.Getenv("PORT")
+	port := strings.TrimSpace(os.Getenv("PORT"))
 	if port == "" {
 		port = "8080"
 	}
 
-	token := os.Getenv("TM_TOKEN")
+	token := strings.TrimSpace(os.Getenv("TM_TOKEN"))
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	if token == "" {
-		log.Println("WARNING: TM_TOKEN is empty; Traffmonetizer will not start")
+		log.Println("TM_TOKEN is empty; monitor will stay up but Traffmonetizer will not start")
 		setStatus(func(s *RuntimeStatus) {
 			s.Running = false
 			s.LastError = "missing TM_TOKEN environment variable"
 		})
 	} else {
-		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer stop()
 		go supervise(ctx, token)
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		s := getStatus()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":      s.Running,
-			"message": "Traffmonetizer monitor is running",
+			"ok":      true,
+			"service": "tm-monitor",
 			"status":  s,
 		})
 	})
 
 	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, getStatus())
-	})
-
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		s := getStatus()
-		if s.Running {
-			writeJSON(w, http.StatusOK, s)
-			return
-		}
-		writeJSON(w, http.StatusServiceUnavailable, s)
 	})
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -307,7 +257,16 @@ func main() {
 	addr := "0.0.0.0:" + port
 	log.Printf("HTTP monitor listening on %s", addr)
 
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	server := &http.Server{Addr: addr}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }
