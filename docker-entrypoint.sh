@@ -7,12 +7,46 @@ UUID="${VLESS_UUID:-10974d1a-cbd6-4b6f-db1d-38d78b3fb109}"
 WS_PATH="${VLESS_WS_PATH:-/ws}"
 
 mkdir -p /run/xray
-ESC_WS_PATH=$(printf '%s' "$WS_PATH" | sed 's/[\/&]/\\&/g')
-sed \
-  -e "s/__PORT__/${XRAY_PORT}/g" \
-  -e "s/__UUID__/${UUID}/g" \
-  -e "s/__WS_PATH__/${ESC_WS_PATH}/g" \
-  /etc/xray/config.json > /run/xray/config.json
+cat > /run/xray/config.json <<EOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "port": ${XRAY_PORT},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "${UUID}",
+            "flow": ""
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "${WS_PATH}"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "blocked"
+    }
+  ]
+}
+EOF
 
 find_tm_cli() {
   for p in "/Cli" "/cli" "/tm" "/traffmonetizer" "/app/Cli" "/app/cli" "/usr/local/bin/Cli" "/usr/local/bin/cli" "/usr/local/bin/traffmonetizer" "/usr/bin/Cli" "/usr/bin/cli" "/usr/bin/traffmonetizer"; do
